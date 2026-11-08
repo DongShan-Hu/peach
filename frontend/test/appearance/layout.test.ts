@@ -29,10 +29,10 @@ describe('卡片版式', () => {
     expect(changed).toEqual({ active: true, size: 'big', portrait: false, javImage: 'cover' });
   });
 
-  it('骨架与真卡同一个比例：竖屏 9:16，分大小图的路径上大图取正封比例，其余 16:9', () => {
+  it('骨架与真卡同一个比例：显式竖屏 9:16，其余作品卡统一取正封比例', () => {
     const at = (active: boolean, size: 'big' | 'small', portrait: boolean) => cardRatio({ active, size, portrait, javImage: 'cover' });
     expect([at(true, 'big', true), at(true, 'big', false), at(false, 'big', false), at(true, 'small', false)])
-      .toEqual([9 / 16, COVER_FRONT_RATIO, 16 / 9, 16 / 9]);
+      .toEqual([9 / 16, COVER_FRONT_RATIO, COVER_FRONT_RATIO, COVER_FRONT_RATIO]);
     /* 比本机最宽的正封（0.749）还宽一点：大图只留正封、一张都不从左边切。 */
     expect(COVER_FRONT_RATIO).toBe(0.75);
   });
