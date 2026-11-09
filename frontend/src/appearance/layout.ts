@@ -5,20 +5,21 @@
 import { normalizeJavLayout, type JavLayout } from '../jav-artwork';
 import type { SettingsStore } from '../settings-store';
 import { allowedSetting, appSettingsStore, type AppSettings } from './settings';
+import { t } from '../i18n';
 
 /** `[值, 显示名, 字形]`：版式开关在设置面板与筛选条下排各有一组，读的都是这一张表。 */
 export const JAV_LAYOUTS: readonly (readonly [value: string, label: string, icon: string])[] = [
-  ['big', '大图', 'maximize'], ['small', '小图', 'layout-grid'],
+  ['big', t('settings:tileSize.large'), 'maximize'], ['small', t('settings:tileSize.small'), 'layout-grid'],
 ];
 /* 图片墙是等宽网格，改的是列数。默认小图——一套图几十上百张，先看得见全貌，挑中哪一张再点开看大的。 */
 type Choice = readonly [value: string, label: string, icon: string];
 export const PHOTO_SIZES: readonly [big: Choice, small: Choice] = [
-  ['big', '大图', 'maximize'], ['small', '小图', 'layout-grid'],
+  ['big', t('settings:tileSize.large'), 'maximize'], ['small', t('settings:tileSize.small'), 'layout-grid'],
 ];
 export const PHOTO_LAYOUTS: readonly (readonly [value: string, label: string, icon: string])[] = [
-  ['fixed', '固定比例', 'layout-grid'], ['masonry', '瀑布流', 'columns-2'],
+  ['fixed', t('settings:photoLayout.fixed'), 'layout-grid'], ['masonry', t('settings:photoLayout.masonry'), 'columns-2'],
 ];
-/* 大图卡片固定为 3:4；传统正封完整居中，比例留白使用同图模糊补底，整幅大封按主体取景。 */
+/* 卡片默认按 3:4 正封框排；大图密度下，整幅横版画面再按原比例占位。 */
 export const COVER_FRONT_RATIO = 0.75;
 
 type LayoutSettings = Pick<AppSettings, 'javLayout' | 'homeLayout' | 'photoSize' | 'photoLayout' | 'javImage'>;
@@ -53,10 +54,10 @@ export function gridLayout(
   return gridLayoutValue!;
 }
 
-/** 作品网格的骨架与真卡共享比例：显式竖屏为 9:16，大图为正封比例，其余为 16:9。 */
+/** 作品网格的骨架与真卡共享默认比例：显式竖屏为 9:16，其余用正封的 3:4 竖框。 */
 export function cardRatio(layout: GridLayout): number {
   if (layout.portrait) return 9 / 16;
-  return layout.active && layout.size === 'big' ? COVER_FRONT_RATIO : 16 / 9;
+  return COVER_FRONT_RATIO;
 }
 
 /* 写入都是「归一化、落盘」两步。落盘之后要重画哪一块（网格、筛选条、照片墙）是壳的事：哪些岛正挂着、

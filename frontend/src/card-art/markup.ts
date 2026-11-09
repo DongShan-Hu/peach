@@ -10,6 +10,7 @@ import { entityDisplayName } from '../core/entity-names';
 import { javImageKind } from '../jav-artwork';
 import { imageFallbackAttrs } from './image-fallback';
 import { representativeOf } from './representatives';
+import { t } from '../i18n';
 
 /** 人脸取景：`axis`／`pct` 是挪的那一半，`box` 是放大的那一半（`/api/entity` 的 `avatar_focus`）。 */
 export interface FaceFocus {
@@ -31,7 +32,7 @@ export interface FaceRef {
 }
 
 /** 代表作画面替账号顶着圆框时，悬停与读屏读到的那句。 */
-export const STAND_IN_TITLE = '代表作画面，非本人';
+export const STAND_IN_TITLE = t('catalog:cardIdentity.standInAvatar');
 
 /* 原地替换的图（实体图、封面、标识）地址都带服务端下发的内容版本（文件修改时间）：换头像、
    补高清封面、换标识都覆盖同一个文件，地址不跟着变的话，同一页里浏览器直接复用内存里那张
@@ -73,7 +74,7 @@ const focusOf = (value: unknown): FaceFocus | null =>
 /** 「女优」只用于番号发行物。素人、创作者自制和网红内容里的出镜者是艺人，套上 JAV 的行业
  *  称谓既不准确也会和创作者身份混淆。判据由后端 `is_jav` 给。 */
 export function performerLabel(item: { is_jav?: boolean } | null | undefined): string {
-  return item && item.is_jav ? '女优' : '艺人';
+  return item && item.is_jav ? t('catalog:shared.actresses') : t('catalog:shared.performers');
 }
 
 /* 实体那张脸：规范实体图优先，取不到退到代表作头像，两样都取不到就一个 `<img>`
@@ -219,15 +220,61 @@ export function faceBoxAttrs(value: unknown): string {
 export interface CoverItem {
   id?: number;
   code?: string;
+  width?: number | null;
+  height?: number | null;
   cover_key?: string;
   is_jav?: boolean;
   has_cover?: boolean;
   cover_version?: string;
   has_thumb?: boolean;
   has_local_poster?: boolean;
-  cover_frame?: { cx?: number | null; cy?: number | null; layout?: string } | null;
+  poster_ratio?: number | null;
+  cover_frame?: { cx?: number | null; cy?: number | null; layout?: string; ratio?: number | null } | null;
   poster_box?: { x0?: number; y0?: number; x1?: number; y1?: number; px?: number[]; method?: string } | null;
   [field: string]: unknown;
+}
+
+/** 传统封套与整幅横版画面的分界。与 `coverAnchor` 的加载后分流共用这一条界线。 */
+export const SLEEVE_RATIO_MIN = 1.2;
+export const STILL_COVER_RATIO_MIN = 1.65;
+export const NATURAL_THUMB_RATIO_MIN = SLEEVE_RATIO_MIN;
+
+function declaredStill(item: CoverItem): boolean {
+  const frame = item.cover_frame || {};
+  return item.poster_box?.method !== 'manual' && (frame.layout === 'still'
+    || /^(IENEE|IENFE|SDHS)-/i.test(String(item.code || ''))
+    || /(?:【|\[|\(|（)\s*(?:[48]K\s*)?VR\s*(?:】|\]|\)|）)/i.test(
+      String(item.title || item.display_title || item.name || '')));
+}
+
+/** 首帧就能确定是整幅画面的封面，返回 sidecar 记下的原图比例。
+ *
+ * 图片加载后 `coverAnchor` 还会按真实自然尺寸重算；这里只负责让屏外卡片在图片尚未
+ * 解码时也按最终高度占位。传统 DVD／Blu-ray 封套仍走固定卡框和正封取景，不能把
+ * 1.2–1.65 的封套误当成整幅画面。
+ */
+export function naturalCoverRatio(item: CoverItem): number | null {
+  const ratio = Number(item.cover_frame?.ratio);
+  if (!Number.isFinite(ratio) || ratio <= 0) return null;
+  return /^FC2(?:-PPV)?-/i.test(String(item.code || ''))
+    || declaredStill(item) || ratio >= STILL_COVER_RATIO_MIN ? ratio : null;
+}
+
+/** 本地预览格在图片解码前使用视频本身的宽高比。
+ *
+ * `/poster` 是从视频快照切成九宫格中的一格，横竖方向与视频一致；竖屏与正封继续
+ * 使用固定卡框。少一条时安静回落，让加载后的自然尺寸分支接管。
+ */
+export function naturalThumbRatio(item: CoverItem): number | null {
+  /* 已生成的预览图可能来自与视频元数据比例不同的本地印相。服务端把文件头的真实
+     比例随卡片下发时，首帧就直接使用它；没有文件时再退回视频尺寸。 */
+  const poster = Number(item.poster_ratio);
+  if (Number.isFinite(poster) && poster > 0) return poster;
+  const width = Number(item.width);
+  const height = Number(item.height);
+  if (!(width > 0 && height > 0)) return null;
+  const ratio = width / height;
+  return Number.isFinite(ratio) && ratio > NATURAL_THUMB_RATIO_MIN ? ratio : null;
 }
 
 /* 官方封面那张 `<img>`。人脸位置原样交给页面，锚点由 `coverAnchor` 在加载后算：哪个轴被裁、
@@ -237,9 +284,7 @@ export function coverImage(item: CoverItem, layout: 'big' | 'small', eager = fal
   const src = cardCoverUrl(item);
   const wide = /ブルーレイ|blu[\s-]?ray/i.test(String(item.title || item.display_title || item.name || ''));
   const f = item.cover_frame || {};
-  const still = item.poster_box?.method !== 'manual' && (f.layout === 'still'
-    || /^(IENEE|IENFE|SDHS)-/i.test(String(item.code || ''))
-    || /(?:【|\[|\(|（)\s*(?:[48]K\s*)?VR\s*(?:】|\]|\)|）)/i.test(String(item.title || item.display_title || item.name || '')));
+  const still = declaredStill(item);
   const faceY = f.cy == null ? null : still ? Math.min(1, Math.max(0, f.cy)) : Math.min(0.6, Math.max(0.05, f.cy));
   const face = [f.cx != null ? ` data-cx="${f.cx}"` : '',
     faceY != null ? ` data-cy="${faceY}"` : ''].join('');
@@ -312,7 +357,7 @@ export function frameArtwork(item: CoverItem, eager: boolean): Artwork {
 
 /** 播放队列一行的小图：Mix 画面按小图取，没有可用的图就写「无预览」占住那一格。 */
 export function queueThumbHtml(item: CoverItem, javImage: unknown): string {
-  return mixFace(item, 'small', false, javImage).html || '<span class="nopic">无预览</span>';
+  return mixFace(item, 'small', false, javImage).html || `<span class="nopic">${t('catalog:catalogList.noPreview')}</span>`;
 }
 
 /* 详情开场给播放器的海报位：video.js 的脚本还在下载、流源还没接上时，画面先给本地
@@ -358,7 +403,7 @@ export function cardIdentity(item: IdentityItem): {
   const primaryCreator = item.is_jav && performer ? '' : item.creator || '';
   const kind = primaryCreator ? 'creator' : performer ? 'performer' : '';
   return {
-    kind, name: primaryCreator || performer || '未归属',
+    kind, name: primaryCreator || performer || t('catalog:shared.uncredited'),
     coStarred: performers.length > 1 && !primaryCreator, performers, refs,
     total: item.performer_total || performers.length,
   };
@@ -387,5 +432,5 @@ export function mixLabel(item: IdentityItem, tagLabel: (tag: string) => string):
   if (item.is_jav && performer) return entityDisplayName('performer', performer);
   if (item.creator) return entityDisplayName('creator', item.creator);
   return (performer ? entityDisplayName('performer', performer) : '') || item.studio || item.code
-    || tagLabel((item.tags || [])[0] || '') || '为你推荐';
+    || tagLabel((item.tags || [])[0] || '') || t('catalog:shared.recommendedForYou');
 }

@@ -2,9 +2,9 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
-import { createTranslator, resources, storedInterfaceLanguage, INTERFACE_LANGUAGES, SOURCE_LANGUAGE } from '../src/i18n';
+import { createTranslator, resolveInterfaceLanguage, resources, storedInterfaceLanguage, INTERFACE_LANGUAGES, SOURCE_LANGUAGE } from '../src/i18n';
 // @ts-expect-error 检查脚本是纯 ESM，没有类型声明
-import { BASELINE, countLiterals, scan } from '../scripts/i18n-literals.mjs';
+import { countLiterals, scan } from '../scripts/i18n-literals.mjs';
 
 const frontend = resolve(__dirname, '..');
 const locales = join(frontend, 'src/locales');
@@ -53,8 +53,10 @@ describe('界面文案的语言资源', () => {
     for (const ns of namespaces(SOURCE_LANGUAGE)) {
       const zh = read(SOURCE_LANGUAGE, ns), en = read('en', ns);
       for (const [key, text] of Object.entries(en)) {
-        const source = zh[key] ?? zh[`${base(key)}_other`] ?? '';
-        expect(placeholders(text), `${ns}:${key}`).toEqual(placeholders(source));
+        const source = zh[key] ?? zh[`${base(key)}_other`] ?? zh[base(key)] ?? '';
+        /* 单数可以省掉必然是 1 的数字（Every hour），但不能多出源文没有的占位。 */
+        if (key.endsWith('_one')) expect(placeholders(text).filter((name) => !placeholders(source).includes(name)), `${ns}:${key}`).toEqual([]);
+        else expect(placeholders(text), `${ns}:${key}`).toEqual(placeholders(source));
       }
     }
   });
@@ -65,10 +67,12 @@ describe('界面文案的语言资源', () => {
     for (const ns of namespaces(SOURCE_LANGUAGE)) {
       const zh = read(SOURCE_LANGUAGE, ns), en = read('en', ns);
       for (const [key, text] of Object.entries(en)) {
-        const source = zh[key] ?? zh[`${base(key)}_other`] ?? '';
+        const source = zh[key] ?? zh[`${base(key)}_other`] ?? zh[base(key)] ?? '';
+        /* 占位名是代码里的变量名（如 {{done}}），不是译文里的词。 */
+        const prose = text.replace(/\{\{[^}]*\}\}/g, ' ');
         for (const term of banned) {
           const word = new RegExp(`\\b${term.en.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
-          if (source.includes(term.zh) && word.test(text)) hits.push(`${ns}:${key}「${source}」→ ${text}：${term.zh} 不写 ${term.en}`);
+          if (source.includes(term.zh) && word.test(prose)) hits.push(`${ns}:${key}「${source}」→ ${text}：${term.zh} 不写 ${term.en}`);
         }
       }
     }
@@ -84,12 +88,29 @@ describe('界面文案的语言资源', () => {
 });
 
 describe('界面语言', () => {
-  it('从本地偏好同步读出，没存或不认识时用源语言', () => {
+  it('选了固定语言就用它，不看浏览器', () => {
+    const storage = (value: unknown) => ({ getItem: () => JSON.stringify(value) });
+    expect(storedInterfaceLanguage(storage({ interfaceLanguage: 'en' }), ['zh-CN'])).toBe('en');
+    expect(storedInterfaceLanguage(storage({ interfaceLanguage: 'zh-CN' }), ['en-US'])).toBe('zh-CN');
+  });
+
+  it('自动：按浏览器语言的顺序取第一个有译文的，中文各种写法都给简体中文', () => {
+    expect(resolveInterfaceLanguage('auto', null, ['ja-JP', 'zh-TW', 'en-US'])).toBe('zh-CN');
+    expect(resolveInterfaceLanguage('auto', 'zh-CN', ['en-GB', 'zh-CN'])).toBe('en');
+    expect(resolveInterfaceLanguage('auto', null, ['zh-Hant-HK'])).toBe('zh-CN');
+  });
+
+  it('自动：浏览器语言都没有译文时看系统语言，再没有就用英文', () => {
+    expect(resolveInterfaceLanguage('auto', 'zh-CN', ['ja-JP', 'fr'])).toBe('zh-CN');
+    expect(resolveInterfaceLanguage('auto', null, ['ja-JP'])).toBe('en');
+    expect(resolveInterfaceLanguage('auto', 'de-DE', [])).toBe('en');
+  });
+
+  it('没存、存坏或不认识的选择按自动算，系统语言从本地缓存读', () => {
     const storage = (value: string | null) => ({ getItem: () => value });
-    expect(storedInterfaceLanguage(storage(JSON.stringify({ interfaceLanguage: 'en' })))).toBe('en');
-    expect(storedInterfaceLanguage(storage(JSON.stringify({ interfaceLanguage: 'fr' })))).toBe('zh-CN');
-    expect(storedInterfaceLanguage(storage('{坏掉'))).toBe('zh-CN');
-    expect(storedInterfaceLanguage(storage(null))).toBe('zh-CN');
+    expect(storedInterfaceLanguage(storage(null), ['zh-CN'])).toBe('zh-CN');
+    expect(storedInterfaceLanguage(storage('{坏掉'), ['en-US'])).toBe('en');
+    expect(storedInterfaceLanguage(storage(JSON.stringify({ interfaceLanguage: 'fr', systemLanguage: 'zh-CN' })), ['ja'])).toBe('zh-CN');
   });
 
   it('英文取英文，缺的键回落到源文', () => {
@@ -99,16 +120,55 @@ describe('界面语言', () => {
     expect(en.t('navigation:onlySource')).toBe('仅源文');
     expect(createTranslator('zh-CN').t('navigation:manage.configuration')).toBe('Peach 配置');
   });
+
+  it('数字 count 选单复数并按语言加千位分隔', () => {
+    const en = createTranslator('en');
+    en.addResources('en', 'navigation', { items_one: '{{count, number}} item', items_other: '{{count, number}} items' });
+    en.addResource('zh-CN', 'navigation', 'items', '{{count, number}} 项');
+    expect([en.t('navigation:items', { count: 1 }), en.t('navigation:items', { count: 1234 })]).toEqual(['1 item', '1,234 items']);
+    expect(en.t('navigation:items', { count: 1234, lng: 'zh-CN' })).toBe('1,234 项');
+  });
+
+  it('count 传数字，不传格式化好的字符串', () => {
+    // 字符串 count 不走单复数，英文找不到不带后缀的键，整句会回落成中文。
+    const offenders: string[] = [];
+    const visit = (dir: string) => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const path = join(dir, entry.name);
+        if (entry.isDirectory()) { if (entry.name !== 'locales') visit(path); continue; }
+        if (!/\.(ts|tsx|js)$/.test(entry.name)) continue;
+        readFileSync(path, 'utf8').split('\n').forEach((line, index) => {
+          if (/\bt\(\s*'[^']+'[^)]*\bcount:\s*[^,}]*toLocaleString\(/.test(line)) offenders.push(`${path}:${index + 1}`);
+        });
+      }
+    };
+    visit(join(frontend, 'src'));
+    expect(offenders).toEqual([]);
+  });
 });
 
-describe('写死的中文文案只减不增', () => {
-  it('逐个文件不超过基线，基线外的文件没有中文文案', () => {
-    const baseline: Record<string, number> = JSON.parse(readFileSync(BASELINE, 'utf8'));
-    const raised = Object.entries(scan() as Record<string, number>)
-      .filter(([file, count]) => count > (baseline[file] ?? 0))
-      .map(([file, count]) => `${file}: ${count}（基线 ${baseline[file] ?? 0}）`);
-    expect(raised, '新文案写进 src/locales/<语言>/*.json，用 t() 取；抽走后跑 node scripts/i18n-literals.mjs --write 收紧基线').toEqual([]);
+describe('前端不写死中文', () => {
+  it('src 下没有未豁免的中文文案', () => {
+    expect(scan(), '新文案写进 src/locales/<语言>/*.json，用 t() 取；不是界面文案的中文在同一行或上一行写 // i18n-exempt: 理由').toEqual({});
   }, 60_000);
+
+  it('外壳页面里的中文文字和属性都标了翻译键，键在资源里', () => {
+    const doc = new DOMParser().parseFromString(readFileSync(join(frontend, '../web/index.html'), 'utf8'), 'text/html');
+    const zh = Object.fromEntries(namespaces(SOURCE_LANGUAGE).flatMap((ns) => Object.keys(read(SOURCE_LANGUAGE, ns)).map((key) => [`${ns}:${key}`, true])));
+    const missing: string[] = [];
+    for (const node of doc.body.querySelectorAll<HTMLElement>('*')) {
+      if (node.closest('script, style, svg')) continue;
+      const own = [...node.childNodes].filter((child) => child.nodeType === 3).map((child) => child.textContent).join('');
+      const marks: [string, string | undefined, string | null][] = [['文字', node.dataset.i18n, /[㐀-鿿]/.test(own) ? own.trim() : null],
+        ...(['title', 'aria-label', 'placeholder'] as const).map((name): [string, string | undefined, string | null] =>
+          [name, node.getAttribute(`data-i18n-${name}`) ?? undefined, /[㐀-鿿]/.test(node.getAttribute(name) ?? '') ? node.getAttribute(name) : null])];
+      for (const [what, key, text] of marks) {
+        if (text && !key) missing.push(`#${node.id || node.tagName} ${what}「${text}」没有键`);
+        if (key && !zh[key]) missing.push(`#${node.id || node.tagName} ${what} 的键 ${key} 不在资源里`);
+      }
+    }
+    expect(missing).toEqual([]);
+  });
 
   it('计数认字符串、模板和 JSX 文字，不认注释、对象键、导入路径和 console', () => {
     const source = [
@@ -121,5 +181,22 @@ describe('写死的中文文案只减不增', () => {
       "const d = 'plain';",
     ].join('\n');
     expect(countLiterals('sample.tsx', source)).toBe(3);
+  });
+
+  it('同一行或上一行写明理由的 i18n-exempt 不计数，没写理由的照算', () => {
+    const source = [
+      "const a = tag === '竖屏'; // i18n-exempt: 标签值",
+      '// i18n-exempt: 服务端原文',
+      "const b = message.startsWith('整理跳过');",
+      "const c = '没理由'; // i18n-exempt:",
+      "const d = '不豁免';",
+    ].join('\n');
+    expect(countLiterals('sample.ts', source)).toBe(2);
+  });
+
+  it('整文件豁免只认文件头注释里写明理由的 i18n-exempt-file', () => {
+    expect(countLiterals('a.js', "/* 核心。\n * i18n-exempt-file: classic script */\nconst a = '中文';")).toBe(0);
+    expect(countLiterals('b.js', "const x = 1;\n/* i18n-exempt-file: 不在文件头 */\nconst a = '中文';")).toBe(1);
+    expect(countLiterals('c.js', "/* i18n-exempt-file: */\nconst a = '中文';")).toBe(1);
   });
 });

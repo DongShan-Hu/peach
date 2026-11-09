@@ -100,6 +100,37 @@ class _WorktreeCase(unittest.TestCase):
             "src/peach/__init__.py": VERSION_SEED,
         }, "base")
 
+    def sleeper(self, cwd: Path) -> tuple[subprocess.Popen, int]:
+        """启动一个停在该目录的解释器，并返回真正持有目录的 PID。
+
+        Windows 的 venv 启动器会再拉起一个解释器子进程；启动器本身很快退出，
+        目录却由子进程持有。只比较 ``Popen.pid`` 会让测试随进程切换时机时红时绿。
+        """
+        cwd.mkdir(parents=True, exist_ok=True)
+        child = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"],
+                                 cwd=cwd, stdin=subprocess.PIPE)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            rows = processes_under([cwd])
+            if isinstance(rows, str):
+                child.kill()
+                child.wait(timeout=15)
+                self.fail(rows)
+            direct = next((row for row in rows if row["pid"] == child.pid), None)
+            descendants = [row for row in rows if row["ppid"] == child.pid]
+            if descendants:
+                return child, descendants[0]["pid"]
+            if direct:
+                return child, direct["pid"]
+            time.sleep(0.1)
+        child.kill()
+        child.wait(timeout=15)
+        self.fail("没有在目标目录下找到启动的解释器进程")
+
+    def stop(self, child: subprocess.Popen) -> None:
+        # EOF 让解释器自己退出；Windows venv 启动器也会等其子进程结束。
+        child.communicate(timeout=10)
+
     def tearDown(self):
         self.tmp.cleanup()
 
@@ -276,7 +307,7 @@ class PullRequestIntegrationTests(_WorktreeCase):
         body = ("排查记录里顺带提到 #3，不算关联。\n\nRefs #45\r\n"
                 "  Refs peach-mitao/peach-roadmap#7\n"
                 "Fixes https://github.com/example/peach/issues/8\n"
-                "Refs N01（Telegram 反馈）\n")
+                "Refs Telegram 用户反馈（非 GitHub issue）\n")
         with self.github(json.dumps({**self.pr, "body": body})):
             result = integrate(self.repo, self.branch)
         refs = ["Refs #45", "Refs peach-mitao/peach-roadmap#7",
@@ -297,6 +328,13 @@ class PullRequestIntegrationTests(_WorktreeCase):
             self.pr["headRefOid"] = _git(self.worker, "rev-parse", "HEAD").stdout.strip()
             with self.github(json.dumps({**self.pr, "body": "只修 ZZQ-101 的前缀。"})):
                 self.assertRaisesRegex(WorkspaceError, "提交 [0-9a-f]+（人物 2 个", integrate, self.repo, self.branch)
+
+    def test_insider_terms_in_the_pr_body_are_refused_but_commit_messages_may_name_the_tooling(self):
+        with mock.patch.object(check_public_text, "load_library", return_value=None):
+            self.assertRaisesRegex(WorkspaceError, "内部用语.*合批", agent_worktree.require_public_text,
+                                   self.repo, {"PR 正文": "合批验证：两处反馈修复。"})
+            agent_worktree.require_public_text(self.repo, {"PR 正文": "两处反馈修复一起合入。",
+                                                           "提交 abc1234": "fix(worktree): 工作树残留检查跳过空目录"})
 
     def test_a_single_example_or_a_machine_without_a_ledger_still_integrates(self):
         library = check_public_text.Library(codes={"ZZQ-101", "ZZQ-102", "ZZQ-103"})
@@ -577,15 +615,14 @@ class PruneTests(_WorktreeCase):
     def test_a_worktree_a_process_is_working_in_is_kept(self):
         """会话、终端或预览服务还开在里面的工作树不回收：分支合入了，人还在用。"""
         worker = self._integrated("in-use")
-        process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], cwd=worker)
+        process, pid = self.sleeper(worker)
         try:
             report = prune(self.repo, apply=True)
         finally:
-            process.kill()
-            process.wait(timeout=15)
+            self.stop(process)
         self.assertTrue(worker.is_dir())
         why = next(row["why"] for row in report["kept"] if row["path"] == str(worker))
-        self.assertIn(str(process.pid), why)
+        self.assertIn(str(pid), why)
 
     def test_a_dirty_worktree_is_refused_even_when_its_branch_is_merged(self):
         """分支已合入不等于工作区里没东西。
@@ -736,29 +773,13 @@ class UnregisteredLeftoverTests(_WorktreeCase):
 class LeftoverProcessTests(_WorktreeCase):
     """找出工作树落点下还活着的进程：谁占着删不掉的目录、机器变卡时谁是自己的残留。"""
 
-    def sleeper(self, cwd: Path) -> subprocess.Popen:
-        cwd.mkdir(parents=True, exist_ok=True)
-        child = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"],
-                                 cwd=cwd, stdin=subprocess.PIPE)
-        deadline = time.monotonic() + 10
-        while time.monotonic() < deadline:
-            rows = processes_under([cwd])
-            if any(row["pid"] == child.pid for row in rows):
-                break
-            time.sleep(0.1)
-        return child
-
-    def stop(self, child: subprocess.Popen) -> None:
-        # EOF 让解释器自己退出；Windows venv 启动器也会等其子进程结束。
-        child.communicate(timeout=10)
-
     def test_a_process_working_in_a_worktree_is_listed_with_its_details(self):
-        child = self.sleeper(self.repo.parent / agent_worktree.WORKTREE_ROOT / "busy")
+        child, pid = self.sleeper(self.repo.parent / agent_worktree.WORKTREE_ROOT / "busy")
         try:
             report = agent_worktree.processes(self.repo)
         finally:
             self.stop(child)
-        row = next(row for row in report["processes"] if row["pid"] == child.pid)
+        row = next(row for row in report["processes"] if row["pid"] == pid)
         self.assertFalse(row["orphan"], "父进程（测试本身）还在")
         self.assertFalse(row["caller"])
         self.assertGreaterEqual(row["age_minutes"], 0)
@@ -766,19 +787,19 @@ class LeftoverProcessTests(_WorktreeCase):
         self.assertIn("memory_percent", report["machine"])
 
     def test_the_caller_and_processes_elsewhere_are_told_apart(self):
-        child = self.sleeper(self.root / "elsewhere")
+        child, pid = self.sleeper(self.root / "elsewhere")
         try:
             rows = processes_under([self.root / "elsewhere", Path(os.getcwd())])
         finally:
             self.stop(child)
-        self.assertIn(child.pid, [row["pid"] for row in rows])
-        self.assertNotIn(child.pid, [row["pid"] for row in processes_under([self.repo])])
+        self.assertIn(pid, [row["pid"] for row in rows])
+        self.assertNotIn(pid, [row["pid"] for row in processes_under([self.repo])])
         mine = [row for row in rows if row["pid"] == os.getpid()]
         self.assertEqual([row["caller"] for row in mine], [True], "调用者自己这条链要标出来")
 
     def test_a_directory_nobody_can_delete_names_the_process_holding_it(self):
         held = self.repo / agent_worktree.BUILTIN_WORKTREES / "held-open"
-        child = self.sleeper(held)
+        child, pid = self.sleeper(held)
         try:
             with mock.patch.object(agent_worktree, "_delete_tree",
                                    return_value="PermissionError: 目录被别的进程占着"):
@@ -786,7 +807,7 @@ class LeftoverProcessTests(_WorktreeCase):
         finally:
             self.stop(child)
         self.assertEqual([row["path"] for row in report["residue"]], [str(held)])
-        self.assertIn(child.pid, [row["pid"] for row in report["residue"][0]["holders"]])
+        self.assertIn(pid, [row["pid"] for row in report["residue"][0]["holders"]])
 
     def test_without_psutil_the_scan_says_it_was_not_obtained(self):
         with mock.patch.dict(sys.modules, {"psutil": None}):
@@ -1060,6 +1081,16 @@ class CommitSubjectTests(unittest.TestCase):
         git(self.repo, "commit", "--allow-empty", "-m", "fix(web): 自己的提交")
         git(self.repo, "merge", "--no-ff", "-m", "Merge branch 'master' into worker", "master")
         self.assertEqual(commit_subject.check(self.repo, "master"), [])
+
+    def test_an_adopted_community_commit_keeps_its_own_subject(self):
+        """`merge -s ours` 记入的社区提交原样保留，主题门槛只管本机提交者写的。"""
+        git(self.repo, "checkout", "-b", "community", "master")
+        git(self.repo, "-c", "user.email=someone@users.noreply.github.com", "commit", "--allow-empty",
+            "-m", "Translate frontend UI to English")
+        git(self.repo, "checkout", "worker")
+        git(self.repo, "merge", "-s", "ours", "--no-ff", "-m", "chore(i18n): 记入社区译法", "community")
+        self.assertEqual(commit_subject.check(self.repo, "master"), [])
+        self.assertTrue(self.titled("Translate it myself"))
 
     def test_a_subject_already_on_the_remote_master_is_not_the_worker_s_to_fix(self):
         problems = self.titled("Remove section from README", "docs(readme): 并回网页上的改动")

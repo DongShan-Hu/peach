@@ -33,9 +33,10 @@ from . import (access, auth, certs, data_storage, distribution, entry_links, err
                web_downloads)
 from .config import REPLICATION_ENABLED
 from .jobs import JobAlreadyRunning
-from .routes_auth import (FIRST_ACCESS_DENIED, login_mode, origin_allowed, require_auth, require_authenticated_client, safe_next, same_origin,
+from .routes_auth import (FIRST_ACCESS_DENIED, FIRST_ACCESS_DENIED_CODE, login_mode, origin_allowed, require_auth, require_authenticated_client, safe_next, same_origin,
                           set_auth_cookie, sessions as access_sessions)
 from .web_entry import runtime_fact_entries
+from .user_messages import message_fields
 from .web_local_access import local_client, managed_configuration
 from . import (release_updates, standalone_update, peach_proxy, desktop_startup, desktop_uninstall, docker_update,
                media_tools)
@@ -856,6 +857,13 @@ def _release_notice_facts(request: Request, connection) -> dict:
     unlinked = json.loads(row[0])['garbled_people'].get('links') if row else None
     if unlinked:
         facts['garbled_performers'] = {'count': len(unlinked)}
+    # JavDB 入口补修（`upgrade_repairs.JAVDB_RECORDS_KEY`）的回执行 id 带规则号，结果里逐项记下收起的入口与停用的订阅。
+    row = connection.execute(
+        "SELECT result_json FROM ledger_upgrade_repair WHERE id GLOB 'javdb-actor-records-*' "
+        'ORDER BY applied_at DESC LIMIT 1').fetchone()
+    javdb = json.loads(row[0]) if row else {}
+    if hidden := len(javdb.get('hidden') or ()) + len(javdb.get('disabled_feeds') or ()):
+        facts['javdb_entries'] = {'count': hidden}
     if service.available and (cloud := service.cloud_display_videos()):
         facts['display_cloud_pending'] = {'count': cloud}
     return facts
@@ -1227,7 +1235,7 @@ def first_access(request: Request, body: dict[str, Any] = Body(default_factory=d
     if mode == "password":
         raise HTTPException(409, "访问设置已完成，请刷新页面")
     if mode != "setup":
-        raise HTTPException(403, FIRST_ACCESS_DENIED)
+        raise HTTPException(403, message_fields(FIRST_ACCESS_DENIED, FIRST_ACCESS_DENIED_CODE))
     if not origin_allowed(request, guard="first-access", tunnels=False):
         raise HTTPException(403, "请从 Peach 访问设置页提交")
     if any(not isinstance(body.get(key, ""), str) for key in ("password", "confirmation", "next")):

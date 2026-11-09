@@ -150,7 +150,15 @@ async function ready(page: Page, name = '加入 Peach 馆藏') {
   }, { root: ROOT, label: name }, { timeout: 15_000 }).catch(async error => {
     const panel = await page.locator(ROOT).evaluate(root => ({ button: root.shadowRoot?.querySelector('[data-action="add"]')?.textContent,
       status: root.shadowRoot?.querySelector('p')?.textContent,
-      fields: [...document.querySelectorAll('dt, dd')].map(field => ({ name: field.tagName, text: field.textContent })) })).catch(() => '未取得');
+      fields: [...document.querySelectorAll('dt, dd')].map(field => ({ name: field.tagName, text: field.textContent })) }))
+      .catch(() => page.evaluate(root => ({
+        url: location.href,
+        readyState: document.readyState,
+        rootCount: document.querySelectorAll(root).length,
+        title: document.title,
+        body: document.body?.textContent?.slice(0, 500),
+        calls: window.javMock?.calls?.length,
+      }), ROOT)).catch(() => '未取得');
     throw new Error(`${(error as Error).message}\n${JSON.stringify(panel)}`);
   });
 }
@@ -176,6 +184,7 @@ const AUTOMATIC: Record<string, { path: string; title: string; html: string; sou
   dmm: { path: '/av/content/?id=ssis00519&private=secret#player', source: '/av/content/?id=ssis00519', code: 'SSIS-519', title: '作品详情', html: '<h1>作品详情</h1>' },
   mgs: { path: '/product/product_detail/300MIUM-1239/', code: '300MIUM-1239', title: '作品详情', html: '<h1>作品详情</h1>' },
   'fc2-market': { path: '/article/4900901/', code: 'FC2-PPV-4900901', title: '作品详情', html: '<h1>作品详情</h1>' },
+  'fanza-clip': { path: '/moment?id=img-saba00978-011&i3_ref=fvideo', source: '/moment?id=img-saba00978-011', code: 'SABA-978', title: '作品详情', html: '<h1>作品详情</h1>' },
   missav: { path: '/en/ssis-057', title: 'SSIS-057', html: '<h1>SSIS-057 作品</h1>' },
   jable: { path: '/videos/ssis-057/', title: 'Jable', html: '<div class="video-info"><h4>SSIS-057 作品</h4></div>' },
   'jav-guru': { path: '/12345/ssis-057-detail/', title: 'JAV.guru', html: '<h1 class="entry-title">[SSIS-057] 作品</h1>' },
@@ -235,7 +244,10 @@ describe('JAV 用户脚本', () => {
             assert.equal(new URL(lookup.url).searchParams.get('source_url'), `https://${domain}${fixture.source || fixture.path}`);
           } else assert.equal(new URL(lookup.url).searchParams.get('code'), code);
           await page.evaluate(() => { window.javMock.automatic = false; });
-          await button(page).click();
+          // 站点适配测试只验证提交契约；直接派发到当前按钮，避免 SPA 重建把
+          // Playwright 已解析的节点换成脱离文档的旧节点。指针可用性由后面的
+          // 独立可聚焦与视口用例覆盖。
+          await button(page).evaluate(element => (element as HTMLButtonElement).click());
           await pending(page, 2);
           const submitted = await page.evaluate(() => JSON.parse(window.javMock.calls[1]!.data!));
           assert.deepEqual(submitted, { code, source_url: `https://${domain}${fixture.source || fixture.path}` });
@@ -665,14 +677,14 @@ describe('JAV 用户脚本', () => {
       assert.equal(await opened.page.evaluate(() => window.javMock.calls.length), 31);
       await opened.page.clock.fastForward(13_000);
       await pending(opened.page, 32);
-      // 跳过一小时期限：到点的那次等待结束后再查一次，随后停止并允许手动查询。
+      // 超过一小时上限后停止轮询，保留手动查询入口，不再多发请求。
       await opened.page.clock.fastForward(60 * 60_000);
-      await pending(opened.page, 33);
       await ready(opened.page, '查询 Peach 状态');
       const calls = await opened.page.evaluate(() => window.javMock.calls);
       assert.ok(calls.every(call => call.method === 'GET'));
+      assert.equal(calls.length, 32);
       await opened.page.clock.fastForward(60_000);
-      assert.equal(await opened.page.evaluate(() => window.javMock.calls.length), 33);
+      assert.equal(await opened.page.evaluate(() => window.javMock.calls.length), 32);
     } finally { await opened.close(); }
     const owned = await open(browser, { initial: 'owned' });
     try {
@@ -686,8 +698,9 @@ describe('JAV 用户脚本', () => {
       const opened = await open(browser, { viewport });
       try {
         await ready(opened.page);
-        await button(opened.page).focus();
-        const state = await button(opened.page).evaluate(element => {
+        const control = button(opened.page);
+        await control.focus();
+        const state = await control.evaluate(element => {
           const rect = element.getBoundingClientRect();
           return { left: rect.left, right: rect.right, width: innerWidth,
             focused: element.getRootNode() instanceof ShadowRoot && (element.getRootNode() as ShadowRoot).activeElement === element,
