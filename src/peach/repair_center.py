@@ -16,7 +16,8 @@ from pathlib import Path
 from . import follow_evidence, system_file_repair
 from .media_sources import CLOUD_LOCATIONS
 
-#: 列给用户看的修复：标题、一句做了什么、是否自动执行。顺序就是页面顺序。
+#: 列给用户看的修复：id、标题、一句做了什么、是否自动执行。顺序就是页面顺序。
+#: 前端按 id 取译文（`server:repairCenter.items.<id>`），中文是没有译文时的显示。
 ITEMS = (
     ('catalog', '资料与番号整理', '按新规则修正番号、标题等自动写入的资料，你手动改过的不动', 'auto'),
     ('display-local', '本地视频显示尺寸', '重新读取本机与局域网视频的文件头，修正横竖屏判断', 'auto'),
@@ -25,14 +26,17 @@ ITEMS = (
     ('garbled-people', '乱码人物', '解除早期采集乱码留下的人物关联，重新补采演员', 'auto'),
     ('dangling-candidates', '失效的复核候选', '资产删除后留下的候选改挂到同一文件的新编号，对不上的撤下', 'auto'),
     ('javdb-entries', '人物页的 JavDB 入口', '和作品署名同为有码或同为无码的同名演员页不再给入口，订着它的订阅停用', 'auto'),
+    ('resolution-tags', '来源的 4K 标签', '资料站标的 4K 指官方出过 4K 版，不是这份文件的画质，这类标签解除', 'auto'),
     ('follow-evidence', '关注抓取的旧快照', '每个关注来源只留最近 3 份原始快照和条目引用的那几份，其余删除，删除后不能恢复', 'confirm'),
 )
 #: 历史里的规则：账本行 id 的前缀、名字、计哪个字段（`None` 为资料整理的改动合计）。
+#: 前缀去掉末尾的连字符就是规则 id，前端按它取译文（`server:repairCenter.history.<id>`）。
 RULES = (
     ('catalog-', '资料与番号整理', None), ('verification-settlement-', '核查差异结算', ('applied',)),
     ('studio-unbounded-misses-', '厂牌查询缓存', ('released',)), ('stale-filename-codes-', '清除误认的番号', ('cleared',)),
     ('dangling-candidates-', '失效的复核候选', ('repinned', 'withdrawn')),
     ('javdb-actor-records-', '人物页的 JavDB 入口', ('hidden', 'disabled_feeds')),
+    ('source-resolution-tags-', '来源的 4K 标签', ('tags',)),
     (follow_evidence.RECEIPT_PREFIX, '清理关注抓取的旧快照', ('files',)),
 )
 #: 资料整理回执里不算「改动」的计数：重新探测、转人工与来源快照失效只是排队或让缓存重取，不是改了资料。
@@ -96,7 +100,7 @@ def _history(rows, backup_directories) -> list[dict]:
         if not changed:
             continue
         backups = list({row['name']: row for row in _backups(result, backup_directories)}.values())
-        history.append({'id': row_id, 'title': rule[1], 'at': applied_at, 'changed': changed, 'backups': backups})
+        history.append({'id': row_id, 'rule': rule[0].rstrip('-'), 'title': rule[1], 'at': applied_at, 'changed': changed, 'backups': backups})
     return history
 
 
@@ -163,6 +167,7 @@ def snapshot(connection, receipt: dict, *, cloud_pending: int, backup_directorie
     garbled = _latest(rows, 'garbled_people') or {}
     dangling = next((result for row_id, _, result in rows if row_id.startswith('dangling-candidates-')), {})
     javdb_entries = next((result for row_id, _, result in rows if row_id.startswith('javdb-actor-records-')), {})
+    resolution = next((result for row_id, _, result in rows if row_id.startswith('source-resolution-tags-')), {})
     facts = {
         'catalog': {'state': local.get('state') or ('done' if local else 'none'),
                     'changed': _count({key: value for key, value in local.get('changed', {}).items()
@@ -176,6 +181,7 @@ def snapshot(connection, receipt: dict, *, cloud_pending: int, backup_directorie
                                 'changed': _count(dangling.get('repinned')) + _count(dangling.get('withdrawn'))},
         'javdb-entries': {'state': 'done' if javdb_entries else 'none',
                           'changed': _count(javdb_entries.get('hidden')) + _count(javdb_entries.get('disabled_feeds'))},
+        'resolution-tags': {'state': 'done' if resolution else 'none', 'changed': _count(resolution.get('tags'))},
         'follow-evidence': _follow_evidence(follow_evidence_status, rows),
     }
     items = [{'id': key, 'title': title, 'summary': summary, 'mode': mode, **facts[key]}
