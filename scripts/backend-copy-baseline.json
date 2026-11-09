@@ -93,7 +93,7 @@
   "src/peach/media_tools.py": 7,
   "src/peach/metadata.py": 1,
   "src/peach/metadata_amane.py": 12,
-  "src/peach/metadata_auto_apply.py": 18,
+  "src/peach/metadata_auto_apply.py": 19,
   "src/peach/metadata_creator_attributions.py": 12,
   "src/peach/metadata_policy.py": 1,
   "src/peach/metadata_routes.py": 4,
@@ -119,7 +119,7 @@
   "src/peach/release_notice.py": 1,
   "src/peach/release_signing.py": 5,
   "src/peach/release_updates.py": 1,
-  "src/peach/remote_media_cache.py": 3,
+  "src/peach/remote_media_cache.py": 4,
   "src/peach/remote_reporting.py": 3,
   "src/peach/reporting_transport.py": 1,
   "src/peach/research_participation.py": 2,
@@ -200,7 +200,7 @@
   "src/peach/web_jav_browser_performer.py": 10,
   "src/peach/web_jav_detail.py": 4,
   "src/peach/web_jav_discovery.py": 13,
-  "src/peach/web_library_processing.py": 39,
+  "src/peach/web_library_processing.py": 40,
   "src/peach/web_library_shortcuts.py": 12,
   "src/peach/web_links.py": 16,
   "src/peach/web_media_repair.py": 10,
@@ -221,5 +221,5 @@
   "src/peach/web_wants.py": 4,
   "src/peach/western_artwork.py": 7,
   "src/peach/western_profiles.py": 1,
-  "src/peach/windows_update.py": 3
+  "src/peach/windows_update.py": 9
 }

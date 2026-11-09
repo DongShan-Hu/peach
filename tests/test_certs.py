@@ -21,6 +21,24 @@ from peach.certs import (
     subject_alt_names,
 )
 
+#: 跑 `scripts/setup_local_tls.ps1` 用的 PowerShell：CI 上是 pwsh，只装了 Windows PowerShell
+#: 的机器退回 powershell.exe；两者都没有时这条用例跳过。脚本本身只用 openssl 和基础 cmdlet，
+#: 两个入口的行为一致。
+POWERSHELL = (shutil.which("pwsh") or shutil.which("powershell")) if os.name == "nt" else None
+
+
+def script_execution_blocked() -> bool:
+    """本机执行策略禁止运行 .ps1 时为真。
+
+    `Restricted` 只挡脚本文件，`-Command` 照样能跑——所以先问策略，而不是跑一遍再猜
+    失败原因。策略放开之后这条用例会自动恢复验证，不用改代码。
+    """
+    if not POWERSHELL:
+        return False
+    result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", "Get-ExecutionPolicy"],
+                            capture_output=True, text=True, encoding="utf-8", timeout=60)
+    return result.stdout.strip() == "Restricted"
+
 
 def make_ca(tls_dir: Path) -> CertificateFiles:
     files = CertificateFiles.under(tls_dir)
@@ -177,12 +195,13 @@ class CertificateTests(unittest.TestCase):
             self.assertFalse(worker.is_alive())
             self.assertEqual(failures, [])
 
-    @unittest.skipUnless(os.name == "nt", "需要 Windows PowerShell 签发入口")
+    @unittest.skipUnless(POWERSHELL and not script_execution_blocked(),
+                         "需要能运行 .ps1 的 PowerShell 签发入口")
     def test_powershell_setup_issues_a_strict_leaf(self):
         tls = (Path(self._tmp.name) / "powershell").resolve()
         script = Path(__file__).resolve().parents[1] / "scripts" / "setup_local_tls.ps1"
         result = subprocess.run(
-            [shutil.which("pwsh"), "-NoProfile", "-File", str(script), "-Address", "127.0.0.1",
+            [POWERSHELL, "-NoProfile", "-File", str(script), "-Address", "127.0.0.1",
              "-DnsName", "peach.local", "-OutDir", str(tls)],
             capture_output=True, text=True, encoding="utf-8", timeout=30)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
